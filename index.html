@@ -776,7 +776,8 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
   border-radius:3px;padding:4px 10px;transition:.15s;
 }
 .zoom-chip.on{color:#fff;border-color:rgba(255,255,255,.45)}
-.frame.photo.zoomed{cursor:grab}
+.frame.photo{touch-action:pan-y}            /* 等倍のときは縦スクロールは通す。ピンチはこちらで処理 */
+.frame.photo.zoomed{cursor:grab;touch-action:none}
 .frame.photo.zoomed.grabbing{cursor:grabbing}
 .zoom-chip:hover{color:#fff}
 .play-no{
@@ -3766,7 +3767,6 @@ function layoutCmpFrames(){
 addEventListener("resize", ()=>{ if(!$("#cmp").hidden) layoutCmpFrames(); });
 
 $("#cmpZoom").addEventListener("click", resetCmpView);
-$("#cmpGrid").addEventListener("dblclick", resetCmpView);
 
 // ホイールで拡大。カーソルの下にある点はそのままの位置に残す。
 $("#cmpGrid").addEventListener("wheel", e=>{
@@ -3785,30 +3785,15 @@ $("#cmpGrid").addEventListener("wheel", e=>{
   applyCmpView();
 }, {passive:false});
 
-// ドラッグで移動。1コマ動かせば、残りのコマも同じだけ動く。
-let cDrag = null;
-$("#cmpGrid").addEventListener("pointerdown", e=>{
-  const img = e.target.closest(".cmp-frame"); if(!img || cview.k <= 1) return;
-  const r = img.getBoundingClientRect();
-  if(!r.width || !r.height) return;
-  cDrag = {id:e.pointerId, x:e.clientX, y:e.clientY, w:r.width, h:r.height, img};
-  img.classList.add("grabbing");
-  try{ img.setPointerCapture(e.pointerId); }catch(_){}
-  e.preventDefault();
+// 1コマ動かせば残りのコマも同じだけ動く（指でもマウスでも。ピンチで全コマ拡大）
+attachZoomTouch($("#cmpGrid"), {
+  active : () => !$("#cmp").hidden,
+  skip   : e => !!e.target.closest("button"),
+  frameOf: e => e.target.closest(".cmp-frame"),
+  get    : () => ({k:cview.k, fx:cview.fx, fy:cview.fy}),
+  set    : (k, fx, fy) => { cview.k = k; cview.fx = fx; cview.fy = fy; applyCmpView(); },
+  grab   : (fr, on) => fr && fr.classList.toggle("grabbing", on)
 });
-$("#cmpGrid").addEventListener("pointermove", e=>{
-  if(!cDrag || e.pointerId !== cDrag.id) return;
-  cview.fx += (e.clientX - cDrag.x)/cDrag.w;
-  cview.fy += (e.clientY - cDrag.y)/cDrag.h;
-  cDrag.x = e.clientX; cDrag.y = e.clientY;
-  applyCmpView();
-});
-["pointerup","pointercancel"].forEach(ev=>
-  $("#cmpGrid").addEventListener(ev, ()=>{
-    if(!cDrag) return;
-    cDrag.img.classList.remove("grabbing");
-    cDrag = null;
-  }));
 
 document.querySelector(".cmp-n").addEventListener("click", e=>{
   const b = e.target.closest("button[data-n]"); if(!b) return;
@@ -4025,30 +4010,100 @@ function applyZoom(){
 }
 function resetZoom(){ zoom.k = 1; zoom.fx = zoom.fy = 0; applyZoom(); }
 
-// ドラッグで動かす（拡大しているときだけ）
-let pDrag = null;
+
+/* 拡大画面の指／マウス操作をひとつにまとめる。
+   1本指ドラッグ＝移動（拡大中）、2本指ピンチ＝拡大縮小、ダブルタップ＝2.5倍⇄等倍。
+   倍率と位置は「画面に対する割合」で持つ（fx, fy は中心からのずれ）。 */
+function attachZoomTouch(root, o){
+  const pts = new Map();
+  let pinch = null, pan = null, lastTap = 0, tapPos = null, lastType = "mouse";
+  const norm = (fr, x, y) => {
+    const r = fr.getBoundingClientRect();
+    return {x:(x - r.left)/r.width - 0.5, y:(y - r.top)/r.height - 0.5, w:r.width, h:r.height};
+  };
+  const dbl = (fr, x, y) => {                    // ダブルタップ／ダブルクリック
+    const st = o.get();
+    if(st.k > 1){ o.set(1, 0, 0); return; }
+    const u = norm(fr, x, y), k2 = 2.5;
+    o.set(k2, u.x*(1 - k2), u.y*(1 - k2));      // 押した所を動かさずに2.5倍
+  };
+  root.addEventListener("pointerdown", e=>{
+    lastType = e.pointerType;
+    if(!o.active() || o.skip(e)) return;
+    const fr = o.frameOf(e); if(!fr) return;
+    const r = fr.getBoundingClientRect(); if(!r.width || !r.height) return;
+    pts.set(e.pointerId, {x:e.clientX, y:e.clientY, fr});
+    try{ root.setPointerCapture(e.pointerId); }catch(_){}
+    const st = o.get();
+    if(pts.size >= 2){                           // 2本目の指＝ピンチ開始
+      const [a, b] = [...pts.values()].slice(-2);
+      const m = norm(a.fr, (a.x+b.x)/2, (a.y+b.y)/2);
+      pinch = {ids:[...pts.keys()].slice(-2), fr:a.fr, d0:Math.hypot(a.x-b.x, a.y-b.y),
+               k0:st.k, c:{x:(m.x - st.fx)/st.k, y:(m.y - st.fy)/st.k}};   // 指の間にある画像の点
+      pan = null;
+    }else{
+      const now = performance.now();
+      if(e.pointerType !== "mouse" && now - lastTap < 350 && tapPos &&
+         Math.hypot(e.clientX - tapPos.x, e.clientY - tapPos.y) < 30){
+        dbl(fr, e.clientX, e.clientY); lastTap = 0; pan = null;
+      }else{
+        lastTap = now; tapPos = {x:e.clientX, y:e.clientY};
+        pan = st.k > 1 ? {x:e.clientX, y:e.clientY, w:r.width, h:r.height, fr} : null;
+        if(pan) o.grab(fr, true);
+      }
+    }
+    e.preventDefault();
+  });
+  root.addEventListener("pointermove", e=>{
+    const pt = pts.get(e.pointerId); if(!pt) return;
+    pt.x = e.clientX; pt.y = e.clientY;
+    const st = o.get();
+    if(pinch && pinch.ids.every(id => pts.has(id))){
+      const a = pts.get(pinch.ids[0]), b = pts.get(pinch.ids[1]);
+      const d = Math.hypot(a.x-b.x, a.y-b.y) || 1;
+      const k = clamp(pinch.k0 * d/pinch.d0, 1, 10);
+      const m = norm(pinch.fr, (a.x+b.x)/2, (a.y+b.y)/2);
+      // 指の間にあった画像の点が、いまの指の間に来るようにする
+      o.set(k, m.x - k*pinch.c.x, m.y - k*pinch.c.y);
+      return;
+    }
+    if(pan && st.k > 1){
+      o.set(st.k, st.fx + (e.clientX - pan.x)/pan.w, st.fy + (e.clientY - pan.y)/pan.h);
+      pan.x = e.clientX; pan.y = e.clientY;
+    }
+  });
+  const end = e=>{
+    const pt = pts.get(e.pointerId);
+    pts.delete(e.pointerId);
+    if(pinch && pinch.ids.includes(e.pointerId)){
+      pinch = null;
+      const rest = [...pts.values()][0];       // 1本残ったら、そのまま移動に切り替える
+      const st = o.get();
+      pan = rest && st.k > 1 ? {x:rest.x, y:rest.y, w:rest.fr.getBoundingClientRect().width,
+                                h:rest.fr.getBoundingClientRect().height, fr:rest.fr} : null;
+      if(pt && !rest) o.grab(pt.fr, false);
+      return;
+    }
+    if(pan && pts.size === 0){ o.grab(pan.fr, false); pan = null; }
+  };
+  root.addEventListener("pointerup", end);
+  root.addEventListener("pointercancel", end);
+  root.addEventListener("dblclick", e=>{       // マウスのダブルクリック（指は上で処理済み）
+    if(lastType !== "mouse" || !o.active() || o.skip(e)) return;
+    const fr = o.frameOf(e); if(!fr) return;
+    dbl(fr, e.clientX, e.clientY);
+  });
+}
+
+// 再生中の写真：1本指で移動、2本指で拡大縮小、ダブルタップで2.5倍⇄等倍
 const frameEl = document.querySelector(".frame");
-frameEl.addEventListener("pointerdown", e=>{
-  if(!play.on || zoom.k <= 1) return;
-  if(e.target.closest("button, .exif, .play-tools")) return;   // ボタンの上は普通に押せる
-  const r = frameEl.getBoundingClientRect();
-  if(!r.width || !r.height) return;
-  pDrag = {id:e.pointerId, x:e.clientX, y:e.clientY, w:r.width, h:r.height};
-  try{ frameEl.setPointerCapture(e.pointerId); }catch(_){}
-  frameEl.classList.add("grabbing");
-  e.preventDefault();
-});
-frameEl.addEventListener("pointermove", e=>{
-  if(!pDrag || e.pointerId !== pDrag.id) return;
-  zoom.fx += (e.clientX - pDrag.x)/pDrag.w;
-  zoom.fy += (e.clientY - pDrag.y)/pDrag.h;
-  pDrag.x = e.clientX; pDrag.y = e.clientY;
-  applyZoom();
-});
-["pointerup","pointercancel"].forEach(ev=>
-  frameEl.addEventListener(ev, ()=>{ if(!pDrag) return; pDrag = null; frameEl.classList.remove("grabbing"); }));
-frameEl.addEventListener("dblclick", e=>{
-  if(play.on && zoom.k > 1 && !e.target.closest("button")) resetZoom();
+attachZoomTouch(frameEl, {
+  active : () => play.on,
+  skip   : e => !!e.target.closest("button, .exif, .play-tools"),
+  frameOf: () => frameEl,
+  get    : () => ({k:zoom.k, fx:zoom.fx, fy:zoom.fy}),
+  set    : (k, fx, fy) => { zoom.k = k; zoom.fx = fx; zoom.fy = fy; applyZoom(); },
+  grab   : (fr, on) => frameEl.classList.toggle("grabbing", on)
 });
 
 document.querySelector(".frame").addEventListener("wheel", e=>{
