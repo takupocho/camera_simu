@@ -135,8 +135,18 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 .fc-how{text-align:center;font-size:clamp(15px,1.5vw,22px);font-weight:700;color:var(--amber);margin-bottom:6px;letter-spacing:.06em}
 .fc-cards{display:flex;flex-direction:column;gap:10px;flex:1}
 .fc-card{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:8px 16px 10px;flex:1;display:flex;flex-direction:column;justify-content:center}
-.fc-card.wheel{cursor:ns-resize}
+.fc-card.wheel{cursor:ew-resize;touch-action:none;user-select:none;-webkit-user-select:none}
 .fc-card.wheel:hover{border-color:var(--dim)}
+.fc-card.wheel.dragging{border-color:var(--amber)}
+.fc-steps{display:flex;align-items:center;justify-content:space-between;margin-top:8px;touch-action:auto}
+.fc-step{
+  min-width:56px;height:38px;border-radius:6px;font-size:18px;line-height:1;
+  color:var(--text);background:var(--panel-2);border:1px solid var(--line);
+}
+.fc-step:hover{border-color:var(--dim)}
+.fc-step:active{background:var(--amber);border-color:var(--amber);color:#14100A}
+.fc-tip{font-size:11px;letter-spacing:.06em;color:var(--dim)}
+@media (hover:hover) and (pointer:fine){ .fc-tip{opacity:.7} }
 .fc-card .fc-h{display:flex;align-items:baseline;gap:10px}
 .fc-card .fc-h .ttl{font-size:clamp(22px,2.4vw,40px);font-weight:700;white-space:nowrap}
 .fc-card .fc-h .badge{font-family:var(--f-mono);font-size:11px;letter-spacing:.12em;color:var(--amber);
@@ -1600,7 +1610,7 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line-soft);fo
           <button data-end="w" aria-pressed="true">開放</button><button data-end="t" aria-pressed="false">望遠端</button>
         </div>
       </div>
-      <span class="cmp-hint">左のシャッター・ISOの上でホイール</span>
+      <span class="cmp-hint">左のシャッター・ISOはホイール／ドラッグ／◀▶で調整</span>
       <button class="cmp-x" id="fcmpX" aria-label="閉じる">×</button>
     </div>
     <div class="fc-title">
@@ -4365,6 +4375,10 @@ function fcCard(ttl, unitL, val, unitR, ticks, auto, wheelKey){
     <div class="fc-h"><span class="ttl">${ttl}</span><span class="badge">AUTO</span><span class="spacer"></span>
       <span class="big">${unitL ? `<span class="u">${unitL}</span>` : ""}<span class="v">${val}</span>${unitR ? `<span class="u">${unitR}</span>` : ""}</span></div>
     <div class="fc-ticks">${ticks.map((t,i)=>`<span class="${i===2?"on":""}">${t}</span>`).join("")}</div>
+    ${wheelKey ? `<div class="fc-steps">
+       <button class="fc-step" data-dir="-1" aria-label="速く／下げる">◀</button>
+       <span class="fc-tip">ホイール・ドラッグ・タップ</span>
+       <button class="fc-step" data-dir="1" aria-label="遅く／上げる">▶</button></div>` : ""}
   </div>`;
 }
 const around = (arr, i, f) => [-6,-3,0,3,6].map(d => { const j = i + d; return (j>=0 && j<arr.length) ? f(arr[j]) : ""; });
@@ -4457,7 +4471,12 @@ $("#fcCardsA").addEventListener("wheel", e=>{
   if(Math.abs(d) >= WHEEL_STEP){ fcAcc = 0; step = Math.sign(d); }
   else { fcAcc += d; if(Math.abs(fcAcc) >= WHEEL_STEP){ step = Math.sign(fcAcc); fcAcc = 0; } }
   if(!step) return;
-  if(card.dataset.wheel === "sh"){
+  fcStep(card.dataset.wheel, step);
+}, {passive:false});
+
+// 1/3段ぶん動かす（ホイール・ドラッグ・◀▶ボタン共通）
+function fcStep(key, step){
+  if(key === "sh"){
     const i = clamp(fcShIdx() + step, 0, SH_TBL.length-1);
     opts.fcSh = SH_TBL[i].l;
   }else{
@@ -4465,7 +4484,40 @@ $("#fcCardsA").addEventListener("wheel", e=>{
     opts.fcIso = ISO_TBL[i];
   }
   saveOpts(); paintFcmp();
-}, {passive:false});
+}
+
+// ◀ ▶ をタップ（スマホ・タブレット用）
+$("#fcCardsA").addEventListener("click", e=>{
+  const b = e.target.closest(".fc-step"); if(!b) return;
+  const card = b.closest("[data-wheel]"); if(!card) return;
+  fcStep(card.dataset.wheel, +b.dataset.dir);
+});
+
+// 目盛りを横にドラッグ（指でもマウスでも）。本体のダイヤルと同じ40pxで1目盛り
+const FC_DRAG_PX = 40;
+let fcDrag = null;
+$("#fcCardsA").addEventListener("pointerdown", e=>{
+  const card = e.target.closest("[data-wheel]");
+  if(!card || e.target.closest(".fc-step")) return;
+  fcDrag = {key:card.dataset.wheel, x:e.clientX, id:e.pointerId, el:card};
+  try{ card.setPointerCapture(e.pointerId); }catch(_){}
+  card.classList.add("dragging");
+  e.preventDefault();
+});
+$("#fcCardsA").addEventListener("pointermove", e=>{
+  if(!fcDrag || e.pointerId !== fcDrag.id) return;
+  const dx = e.clientX - fcDrag.x;
+  const steps = Math.trunc(dx / FC_DRAG_PX);
+  if(!steps) return;
+  fcDrag.x += steps * FC_DRAG_PX;
+  fcStep(fcDrag.key, -steps);                 // 右へ引く＝目盛りが右へ＝値は小さいほうへ
+});
+["pointerup","pointercancel"].forEach(ev=>
+  $("#fcCardsA").addEventListener(ev, e=>{
+    if(!fcDrag) return;
+    fcDrag.el.classList.remove("dragging");
+    fcDrag = null;
+  }));
 
 /* ---------------- boot ---------------- */
 buildArt();
