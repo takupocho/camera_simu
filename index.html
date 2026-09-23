@@ -4408,8 +4408,22 @@ const fcFmtF = f => (Math.abs(f - Math.round(f)) < 0.05 ? String(Math.round(f)) 
 // 1/3段の表の中で、いちばん近い場所
 const shSec = x => x.t, shLabel = x => x.l;
 const secFromLabel = l => typeof l === "string" && l.startsWith("1/") ? 1/Number(l.slice(2)) : Number(l);
-const fcShIdx  = () => nearestIdx(SH_TBL, secFromLabel(opts.fcSh), shSec);
-const fcIsoIdx = () => nearestIdx(ISO_TBL, opts.fcIso, x=>x);
+
+/* カメラのダイヤルは 1/8000〜30秒、ISOは 50〜102400 で止まるが、
+   F値比較は「同じ明るさにするには本当は何秒／何ISOが要るか」を出す表なので、
+   その外側まで1/3段の目盛りを伸ばして、頭打ちにしない。 */
+const FC_SH_FAST = ["1/64000","1/51200","1/40000","1/32000","1/25600","1/20000","1/16000","1/12800","1/10000"]
+  .map(l => ({t:1/Number(l.slice(2)), l:l}));
+const FC_SH_LONG = [40,50,60,80,100,120,160,200,240,320,400,480,600,800,960,1200,1600,2000,2400]
+  .map(v => ({t:v, l:String(v)}));
+const FC_SH = [...FC_SH_FAST, ...SH_TBL, ...FC_SH_LONG];
+const FC_SH_LO = FC_SH_FAST.length;                       // カメラで設定できる範囲の先頭
+const FC_SH_HI = FC_SH_LO + SH_TBL.length - 1;            // 同じく最後（30秒）
+const FC_ISO = [25,32,40, ...ISO_TBL, 128000,160000,204800,256000,320000,409600];
+const FC_ISO_LO = 3, FC_ISO_HI = 3 + ISO_TBL.length - 1;
+
+const fcShIdx  = () => nearestIdx(FC_SH, secFromLabel(opts.fcSh), shSec);
+const fcIsoIdx = () => nearestIdx(FC_ISO, opts.fcIso, x=>x);
 
 function fcBuildSelects(){
   const groups = {};
@@ -4468,26 +4482,27 @@ function paintFcmp(){
 
   // 左：基準
   const si = fcShIdx(), ii = fcIsoIdx();
+  const thirds = Math.round(stops*3);            // 1/3段いくつ分か
   const apI = nearestIdx(AP_TBL, fA, x=>x), apJ = nearestIdx(AP_TBL, fB, x=>x);
   const apTicks = i => around(AP_TBL, i, x=>"f/"+x);
-  const shTicks = i => around(SH_TBL, i, shLabel);
-  const isoTicks = i => around(ISO_TBL, i, x=>String(x));
+  const shTicks = i => around(FC_SH, i, shLabel);
+  const isoTicks = i => around(FC_ISO, i, x=>String(x));
   $("#fcCardsA").innerHTML =
     fcCard("絞り", "F値：", fcFmtF(fA), "", apTicks(apI), false, "") +
-    fcCard("シャッター", "", shLabel(SH_TBL[si]), "秒", shTicks(si), false, "sh") +
-    fcCard("ISO感度", "", ISO_TBL[ii], "", isoTicks(ii), false, "iso");
+    fcCard("シャッター", "", shLabel(FC_SH[si]), "秒", shTicks(si), false, "sh") +
+    fcCard("ISO感度", "", FC_ISO[ii], "", isoTicks(ii), false, "iso");
 
-  // 右：シャッターで補う／ISOで補う
-  const sj = nearestIdx(SH_TBL, shSec(SH_TBL[si]) * Math.pow(2, stops), shSec);
-  const ij = nearestIdx(ISO_TBL, ISO_TBL[ii] * Math.pow(2, stops), x=>x);
+  // 右：シャッターで補う／ISOで補う（段数ぶん、目盛りを正確に送る）
+  const sj = clamp(si + thirds, 0, FC_SH.length-1);
+  const ij = clamp(ii + thirds, 0, FC_ISO.length-1);
   $("#fcCardsB1").innerHTML = `<div class="fc-how">シャッターで補う</div>` +
     fcCard("絞り", "F値：", fcFmtF(fB), "", apTicks(apJ), false, "") +
-    fcCard("シャッター", "", shLabel(SH_TBL[sj]), "秒", shTicks(sj), true, "") +
-    fcCard("ISO感度", "", ISO_TBL[ii], "", isoTicks(ii), false, "");
+    fcCard("シャッター", "", shLabel(FC_SH[sj]), "秒", shTicks(sj), true, "") +
+    fcCard("ISO感度", "", FC_ISO[ii], "", isoTicks(ii), false, "");
   $("#fcCardsB2").innerHTML = `<div class="fc-how">ISOで補う</div>` +
     fcCard("絞り", "F値：", fcFmtF(fB), "", apTicks(apJ), false, "") +
-    fcCard("シャッター", "", shLabel(SH_TBL[si]), "秒", shTicks(si), false, "") +
-    fcCard("ISO感度", "", ISO_TBL[ij], "", isoTicks(ij), true, "");
+    fcCard("シャッター", "", shLabel(FC_SH[si]), "秒", shTicks(si), false, "") +
+    fcCard("ISO感度", "", FC_ISO[ij], "", isoTicks(ij), true, "");
 }
 
 function openFcmp(){
@@ -4532,11 +4547,11 @@ $("#fcCardsA").addEventListener("wheel", e=>{
 // 1/3段ぶん動かす（ホイール・ドラッグ・◀▶ボタン共通）
 function fcStep(key, step){
   if(key === "sh"){
-    const i = clamp(fcShIdx() + step, 0, SH_TBL.length-1);
-    opts.fcSh = SH_TBL[i].l;
+    const i = clamp(fcShIdx() + step, FC_SH_LO, FC_SH_HI);   // 基準は実機で設定できる範囲
+    opts.fcSh = FC_SH[i].l;
   }else{
-    const i = clamp(fcIsoIdx() + step, 0, ISO_TBL.length-1);
-    opts.fcIso = ISO_TBL[i];
+    const i = clamp(fcIsoIdx() + step, FC_ISO_LO, FC_ISO_HI);
+    opts.fcIso = FC_ISO[i];
   }
   saveOpts(); paintFcmp();
 }
